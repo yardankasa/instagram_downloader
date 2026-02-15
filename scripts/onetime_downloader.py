@@ -10,6 +10,7 @@ Usage:
   python scripts/onetime_downloader.py profile <username>
   python scripts/onetime_downloader.py post <shortcode>
 """
+import argparse
 import os
 import sys
 import time
@@ -17,6 +18,17 @@ from pathlib import Path
 
 import instaloader
 from dotenv import load_dotenv
+from selenium import webdriver
+from selenium.webdriver.chrome.options import Options
+from selenium.webdriver.chrome.service import Service
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.ui import WebDriverWait
+
+try:
+    from webdriver_manager.chrome import ChromeDriverManager
+except Exception:
+    ChromeDriverManager = None
 
 load_dotenv()
 
@@ -43,43 +55,65 @@ def _set_proxy(loader: instaloader.Instaloader) -> None:
     loader.context._session.proxies.update(proxies)
 
 
+def _find_system_chromium() -> str | None:
+    """Return path to system Chromium on Linux if found."""
+    candidates = [
+        os.getenv("CHROME_BIN"),
+        os.getenv("CHROMIUM_BIN"),
+        "/usr/bin/chromium",
+        "/usr/bin/chromium-browser",
+        "/usr/bin/google-chrome",
+        "/snap/bin/chromium",
+    ]
+    for path in candidates:
+        if path and os.path.isfile(path):
+            return path
+    return None
+
+
 def _login_with_selenium() -> dict:
     """Log in via headless Chrome, handle checkpoint if possible, return cookie dict for Instaloader."""
-    from selenium import webdriver
-    from selenium.webdriver.chrome.options import Options
-    from selenium.webdriver.chrome.service import Service
-    from selenium.webdriver.common.by import By
-    from selenium.webdriver.support import expected_conditions as EC
-    from selenium.webdriver.support.ui import WebDriverWait
-    try:
-        from webdriver_manager.chrome import ChromeDriverManager
-    except Exception:
-        ChromeDriverManager = None
-
     options = Options()
     if SELENIUM_HEADLESS:
         options.add_argument("--headless=new")
     options.add_argument("--no-sandbox")
     options.add_argument("--disable-dev-shm-usage")
     options.add_argument("--disable-gpu")
+    options.add_argument("--disable-software-rasterizer")
+    options.add_argument("--disable-extensions")
+    options.add_argument("--disable-setuid-sandbox")
+    options.add_argument("--remote-debugging-port=0")
     options.add_argument("--window-size=1920,1080")
     if PROXY_URL:
         proxy = PROXY_URL.replace("socks5h://", "socks5://")
         options.add_argument(f"--proxy-server={proxy}")
-    # Use system Chromium on Linux (e.g. apt install chromium-browser)
-    chromium_bin = os.getenv("CHROME_BIN") or os.getenv("CHROMIUM_BIN")
-    if chromium_bin and os.path.isfile(chromium_bin):
+    # Prefer system Chromium on Linux (avoids version mismatch with webdriver-manager)
+    chromium_bin = _find_system_chromium()
+    if chromium_bin:
         options.binary_location = chromium_bin
 
     service = None
-    if ChromeDriverManager is not None and not os.getenv("CHROMEDRIVER_PATH"):
+    chromedriver_path = os.getenv("CHROMEDRIVER_PATH")
+    if chromedriver_path and os.path.isfile(chromedriver_path):
+        service = Service(chromedriver_path)
+    elif not chromium_bin and ChromeDriverManager is not None:
         try:
             service = Service(ChromeDriverManager().install())
         except Exception:
             pass
-    if service is None and os.getenv("CHROMEDRIVER_PATH"):
-        service = Service(os.getenv("CHROMEDRIVER_PATH"))
-    driver = webdriver.Chrome(service=service, options=options) if service else webdriver.Chrome(options=options)
+    try:
+        driver = webdriver.Chrome(service=service, options=options) if service else webdriver.Chrome(options=options)
+    except Exception as e:
+        err = str(e)
+        if "session not created" in err or "Chrome instance exited" in err:
+            print("", file=sys.stderr)
+            print("Chrome/Chromium failed to start. On a VPS try:", file=sys.stderr)
+            print("  1. Install: sudo apt install -y chromium-browser chromium-chromedriver", file=sys.stderr)
+            print("  2. Or:      sudo apt install -y chromium chromium-chromedriver", file=sys.stderr)
+            print("  3. Set in .env or export: CHROME_BIN=/usr/bin/chromium  CHROMEDRIVER_PATH=/usr/bin/chromedriver", file=sys.stderr)
+            print("  4. If it still exits, run under a virtual display: xvfb-run uv run python scripts/onetime_downloader.py ...", file=sys.stderr)
+            print("     (install: sudo apt install -y xvfb)", file=sys.stderr)
+        raise
 
     wait = WebDriverWait(driver, 25)
     cookie_dict = {}
@@ -192,7 +226,6 @@ def download_post(loader: instaloader.Instaloader, shortcode: str, target: str =
 
 
 def main() -> None:
-    import argparse
     p = argparse.ArgumentParser(description="One-time Instagram downloader")
     p.add_argument("mode", choices=["profile", "post"], help="profile = download a user's posts; post = download one post")
     p.add_argument("target", help="Username (e.g. instagram) or post shortcode (e.g. B_K4CykAOtf from .../p/SHORTCODE/)")

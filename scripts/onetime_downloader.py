@@ -49,11 +49,19 @@ def get_loader() -> instaloader.Instaloader:
         dirname_pattern=str(DOWNLOAD_DIR / "{target}"),
     )
     _set_proxy(loader)
-    try:
-        loader.load_session_from_file(USERNAME, SESSION_FILE)
-    except (FileNotFoundError, instaloader.exceptions.BadCredentialsException):
-        loader.login(USERNAME, PASSWORD)
-        loader.save_session_to_file(SESSION_FILE)
+    if os.path.isfile(SESSION_FILE):
+        try:
+            loader.load_session_from_file(USERNAME, SESSION_FILE)
+        except instaloader.exceptions.BadCredentialsException:
+            pass  # fall through to login
+    if not loader.context.is_logged_in:
+        try:
+            loader.login(USERNAME, PASSWORD)
+            loader.save_session_to_file(SESSION_FILE)
+        except instaloader.exceptions.LoginException as e:
+            print("Instagram login failed:", e, file=sys.stderr)
+            print("Check: password correct? 2FA disabled or use interactive_login? Account/challenge?", file=sys.stderr)
+            sys.exit(1)
     _set_proxy(loader)  # session may have been replaced by load/login
     return loader
 

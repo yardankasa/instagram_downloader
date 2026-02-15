@@ -8,4 +8,6 @@ dependencies = [
     "dotenv>=0.9.9",
     "instaloader>=4.15",
     "requests[socks]>=2.32",
+    "selenium>=4.15",
+    "webdriver-manager>=4.0",
 ]

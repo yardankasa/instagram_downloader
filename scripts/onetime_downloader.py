@@ -3,12 +3,16 @@ One-time Instagram downloader using Instaloader.
 Uses .env for INSTAGRAM_USERNAME and INSTAGRAM_PASSWORD (or test_username/test_password).
 Optional: PROXY_URL (e.g. socks5h://127.0.0.1:10808). Session saved under DOWNLOAD_DIR.
 
+Login: tries saved session first, then Instaloader API, then Selenium headless browser
+(so checkpoints can be completed automatically on a VPS with no GUI).
+
 Usage:
-  python scripts/onetime_downloader.py profile <username>   # e.g. profile instagram
-  python scripts/onetime_downloader.py post <shortcode>    # shortcode from .../p/SHORTCODE/
+  python scripts/onetime_downloader.py profile <username>
+  python scripts/onetime_downloader.py post <shortcode>
 """
 import os
 import sys
+import time
 from pathlib import Path
 
 import instaloader
@@ -21,6 +25,7 @@ USERNAME = os.getenv("INSTAGRAM_USERNAME") or os.getenv("test_username")
 PASSWORD = os.getenv("INSTAGRAM_PASSWORD") or os.getenv("test_password")
 DOWNLOAD_DIR = Path(os.getenv("DOWNLOAD_DIR", "downloads"))
 PROXY_URL = os.getenv("PROXY_URL", "socks5h://127.0.0.1:10808").strip() or None
+SELENIUM_HEADLESS = os.getenv("SELENIUM_HEADLESS", "1").strip().lower() in ("1", "true", "yes")
 
 if not USERNAME or not PASSWORD:
     print("Set INSTAGRAM_USERNAME and INSTAGRAM_PASSWORD in .env (or test_username/test_password)")
@@ -31,15 +36,117 @@ DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
 
 
 def _set_proxy(loader: instaloader.Instaloader) -> None:
-    """Set SOCKS proxy on the loader's session (for login and all requests)."""
+    """Set SOCKS proxy on the loader's session."""
     if not PROXY_URL:
         return
     proxies = {"http": PROXY_URL, "https": PROXY_URL}
     loader.context._session.proxies.update(proxies)
 
 
+def _login_with_selenium() -> dict:
+    """Log in via headless Chrome, handle checkpoint if possible, return cookie dict for Instaloader."""
+    from selenium import webdriver
+    from selenium.webdriver.chrome.options import Options
+    from selenium.webdriver.chrome.service import Service
+    from selenium.webdriver.common.by import By
+    from selenium.webdriver.support import expected_conditions as EC
+    from selenium.webdriver.support.ui import WebDriverWait
+    try:
+        from webdriver_manager.chrome import ChromeDriverManager
+    except Exception:
+        ChromeDriverManager = None
+
+    options = Options()
+    if SELENIUM_HEADLESS:
+        options.add_argument("--headless=new")
+    options.add_argument("--no-sandbox")
+    options.add_argument("--disable-dev-shm-usage")
+    options.add_argument("--disable-gpu")
+    options.add_argument("--window-size=1920,1080")
+    if PROXY_URL:
+        proxy = PROXY_URL.replace("socks5h://", "socks5://")
+        options.add_argument(f"--proxy-server={proxy}")
+    # Use system Chromium on Linux (e.g. apt install chromium-browser)
+    chromium_bin = os.getenv("CHROME_BIN") or os.getenv("CHROMIUM_BIN")
+    if chromium_bin and os.path.isfile(chromium_bin):
+        options.binary_location = chromium_bin
+
+    service = None
+    if ChromeDriverManager is not None and not os.getenv("CHROMEDRIVER_PATH"):
+        try:
+            service = Service(ChromeDriverManager().install())
+        except Exception:
+            pass
+    if service is None and os.getenv("CHROMEDRIVER_PATH"):
+        service = Service(os.getenv("CHROMEDRIVER_PATH"))
+    driver = webdriver.Chrome(service=service, options=options) if service else webdriver.Chrome(options=options)
+
+    wait = WebDriverWait(driver, 25)
+    cookie_dict = {}
+
+    try:
+        driver.get("https://www.instagram.com/accounts/login/")
+        time.sleep(2)
+
+        # Username: try name, then placeholder
+        username_sel = (By.NAME, "username")
+        password_sel = (By.NAME, "password")
+        try:
+            wait.until(EC.presence_of_element_located(username_sel))
+        except Exception:
+            username_sel = (By.CSS_SELECTOR, 'input[name="username"], input[aria-label*="Phone"], input[aria-label*="Username"]')
+            wait.until(EC.presence_of_element_located(username_sel))
+        user_el = driver.find_element(*username_sel)
+        pass_el = driver.find_element(*password_sel)
+        user_el.clear()
+        user_el.send_keys(USERNAME)
+        pass_el.clear()
+        pass_el.send_keys(PASSWORD)
+
+        # Submit: button type submit or "Log in" text
+        try:
+            submit = driver.find_element(By.CSS_SELECTOR, 'button[type="submit"]')
+        except Exception:
+            submit = driver.find_element(By.XPATH, '//button[.//span[text()="Log in"]] | //div[@role="button"][.//span[text()="Log in"]]')
+        submit.click()
+
+        # Wait for navigation: either feed (success) or challenge
+        time.sleep(4)
+        for _ in range(30):
+            url = driver.current_url
+            if "/accounts/login/" not in url and "challenge" not in url.lower() and "one_page" not in url:
+                # Likely logged in (feed or home)
+                break
+            # Checkpoint: try to open challenge link if present
+            try:
+                link = driver.find_element(By.CSS_SELECTOR, 'a[href*="auth_platform"], a[href*="challenge"]')
+                href = link.get_attribute("href")
+                if href and "instagram.com" in href:
+                    driver.get(href)
+                    time.sleep(3)
+            except Exception:
+                pass
+            # "Confirm" / "This was me" button
+            try:
+                btn = driver.find_element(By.XPATH, "//button[contains(.,'Confirm') or contains(.,'This was me') or contains(.,'Not Now')]")
+                btn.click()
+                time.sleep(3)
+            except Exception:
+                pass
+            time.sleep(2)
+
+        cookies = driver.get_cookies()
+        cookie_dict = {c["name"]: c["value"] for c in cookies}
+        if "sessionid" not in cookie_dict:
+            raise RuntimeError("Login or checkpoint not completed: no sessionid cookie. Try running with SELENIUM_HEADLESS=0 to see the browser.")
+    finally:
+        driver.quit()
+
+    return cookie_dict
+
+
 def get_loader() -> instaloader.Instaloader:
-    """Create loader and login (reuse session if possible)."""
+    """Create loader: use saved session, or API login, or Selenium headless login."""
     loader = instaloader.Instaloader(
         download_videos=True,
         download_video_thumbnails=False,
@@ -52,17 +159,24 @@ def get_loader() -> instaloader.Instaloader:
     if os.path.isfile(SESSION_FILE):
         try:
             loader.load_session_from_file(USERNAME, SESSION_FILE)
-        except instaloader.exceptions.BadCredentialsException:
-            pass  # fall through to login
+        except Exception:
+            pass
     if not loader.context.is_logged_in:
         try:
             loader.login(USERNAME, PASSWORD)
             loader.save_session_to_file(SESSION_FILE)
-        except instaloader.exceptions.LoginException as e:
-            print("Instagram login failed:", e, file=sys.stderr)
-            print("Check: password correct? 2FA disabled or use interactive_login? Account/challenge?", file=sys.stderr)
-            sys.exit(1)
-    _set_proxy(loader)  # session may have been replaced by load/login
+        except instaloader.exceptions.LoginException:
+            # Fallback: Selenium headless browser (handles checkpoint on VPS)
+            print("API login failed (e.g. checkpoint). Using headless browser login...", file=sys.stderr)
+            try:
+                cookie_dict = _login_with_selenium()
+                loader.context.load_session(USERNAME, cookie_dict)
+                loader.save_session_to_file(SESSION_FILE)
+            except Exception as e:
+                print("Headless browser login failed:", e, file=sys.stderr)
+                print("On VPS install: chromium-browser and chromium-chromedriver (or use Chrome).", file=sys.stderr)
+                sys.exit(1)
+    _set_proxy(loader)
     return loader
 
 

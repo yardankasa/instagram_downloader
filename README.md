@@ -63,12 +63,28 @@ sudo apt install -y xvfb
 xvfb-run uv run python scripts/onetime_downloader.py profile <username>
 ```
 
-Optional: if the Chromium binary is not in a standard path, set in `.env` or before running:
+Optional: if the Chromium binary is not in a standard path, set in `.env`:
 
 ```bash
 CHROME_BIN=/usr/bin/chromium
 CHROMEDRIVER_PATH=/usr/bin/chromedriver
 ```
+
+**If you use Snap Chromium** (`snap install chromium`): Snap’s Chromium needs a display and a matching driver. In `.env` set:
+
+```bash
+CHROME_BIN=/snap/bin/chromium
+CHROMEDRIVER_PATH=/snap/bin/chromium.chromedriver
+```
+
+Then **always** run under a virtual display (Snap Chromium will exit with “Missing X server or $DISPLAY” otherwise):
+
+```bash
+sudo apt install -y xvfb
+xvfb-run -a uv run python scripts/onetime_downloader.py profile <username>
+```
+
+On servers, APT Chromium is usually simpler: `sudo apt install -y chromium-browser chromium-chromedriver` and the paths above (no Snap, no xvfb required for headless).
 
 ### 2. Project setup
 

@@ -73,6 +73,9 @@ def _find_system_chromium() -> str | None:
 
 def _login_with_selenium() -> dict:
     """Log in via headless Chrome, handle checkpoint if possible, return cookie dict for Instaloader."""
+    # Snap Chromium and some builds need DISPLAY even in headless; xvfb-run sets :99
+    if SELENIUM_HEADLESS and not os.environ.get("DISPLAY"):
+        os.environ["DISPLAY"] = ":99"
     options = Options()
     if SELENIUM_HEADLESS:
         options.add_argument("--headless=new")
@@ -92,8 +95,13 @@ def _login_with_selenium() -> dict:
     if chromium_bin:
         options.binary_location = chromium_bin
 
-    service = None
+    # Snap Chromium must use Snap's chromedriver (version must match)
     chromedriver_path = os.getenv("CHROMEDRIVER_PATH")
+    if not chromedriver_path and chromium_bin and "/snap/" in chromium_bin:
+        snap_driver = "/snap/bin/chromium.chromedriver"
+        if os.path.isfile(snap_driver):
+            chromedriver_path = snap_driver
+    service = None
     if chromedriver_path and os.path.isfile(chromedriver_path):
         service = Service(chromedriver_path)
     elif not chromium_bin and ChromeDriverManager is not None:
@@ -108,11 +116,12 @@ def _login_with_selenium() -> dict:
         if "session not created" in err or "Chrome instance exited" in err:
             print("", file=sys.stderr)
             print("Chrome/Chromium failed to start. On a VPS try:", file=sys.stderr)
-            print("  1. Install: sudo apt install -y chromium-browser chromium-chromedriver", file=sys.stderr)
-            print("  2. Or:      sudo apt install -y chromium chromium-chromedriver", file=sys.stderr)
-            print("  3. Set in .env or export: CHROME_BIN=/usr/bin/chromium  CHROMEDRIVER_PATH=/usr/bin/chromedriver", file=sys.stderr)
-            print("  4. If it still exits, run under a virtual display: xvfb-run uv run python scripts/onetime_downloader.py ...", file=sys.stderr)
-            print("     (install: sudo apt install -y xvfb)", file=sys.stderr)
+            print("  If using SNAP Chromium: use Snap's chromedriver (version must match):", file=sys.stderr)
+            print("    CHROMEDRIVER_PATH=/snap/bin/chromium.chromedriver", file=sys.stderr)
+            print("  And run with a virtual display: xvfb-run -a uv run python scripts/onetime_downloader.py ...", file=sys.stderr)
+            print("  (install: sudo apt install -y xvfb)", file=sys.stderr)
+            print("  Prefer APT (often more reliable on servers): sudo apt install -y chromium-browser chromium-chromedriver", file=sys.stderr)
+            print("  Then in .env: CHROME_BIN=/usr/bin/chromium  CHROMEDRIVER_PATH=/usr/bin/chromedriver", file=sys.stderr)
         raise
 
     wait = WebDriverWait(driver, 25)
